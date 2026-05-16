@@ -23,6 +23,25 @@ STYLES = {
 
 import os
 from pathlib import Path
+
+from huggingface_hub import hf_hub_download
+
+def download_models():
+    os.makedirs("models", exist_ok=True)
+    if not SWAPPER_MODEL.exists():
+        hf_hub_download(
+            repo_id="Tejaswi2006/avatar-models",
+            filename="inswapper_128.onnx",
+            local_dir="./models"
+        )
+    if not GFPGAN_MODEL.exists():
+        hf_hub_download(
+            repo_id="Tejaswi2006/avatar-models",
+            filename="GFPGANv1.4.pth",
+            local_dir="./models"
+        )
+
+download_models()
 MODEL_DIR     = Path(os.environ.get("MODEL_DIR", "./models"))
 SWAPPER_MODEL = MODEL_DIR / "inswapper_128.onnx"
 GFPGAN_MODEL  = MODEL_DIR / "GFPGANv1.4.pth"
