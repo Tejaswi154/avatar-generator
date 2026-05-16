@@ -36,21 +36,23 @@ def download_models():
     os.makedirs("models", exist_ok=True)
     try:
         if not SWAPPER_MODEL.exists():
-            st.info("Downloading inswapper model...")
+            print("Downloading inswapper_128.onnx...")
             hf_hub_download(
                 repo_id="Tejaswi2006/avatar-models",
                 filename="inswapper_128.onnx",
                 local_dir="./models"
             )
+            print("Done!")
         if not GFPGAN_MODEL.exists():
-            st.info("Downloading GFPGAN model...")
+            print("Downloading GFPGANv1.4.pth...")
             hf_hub_download(
                 repo_id="Tejaswi2006/avatar-models",
                 filename="GFPGANv1.4.pth",
                 local_dir="./models"
             )
+            print("Done!")
     except Exception as e:
-        st.error(f"Model download failed: {e}")
+        print(f"DOWNLOAD FAILED: {e}")
 
 download_models()
 
@@ -100,7 +102,8 @@ def load_gfpgan():
         arch="clean",
         channel_multiplier=2,
         bg_upsampler=None
-    )def prepare_image(uploaded_file, size=(512, 512)) -> Image.Image:
+    )
+def prepare_image(uploaded_file, size=(512, 512)) -> Image.Image:
     img = Image.open(uploaded_file).convert("RGB")
     if img.size != size:
         img = img.resize(size, Image.LANCZOS)
