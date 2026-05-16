@@ -34,6 +34,9 @@ SD_MODEL      = "Lykon/DreamShaper"
 
 def download_models():
     os.makedirs("models", exist_ok=True)
+    print(f"MODEL_DIR: {MODEL_DIR}")
+    print(f"SWAPPER exists: {SWAPPER_MODEL.exists()}")
+    print(f"SWAPPER path: {SWAPPER_MODEL}")
     try:
         if not SWAPPER_MODEL.exists():
             print("Downloading inswapper_128.onnx...")
