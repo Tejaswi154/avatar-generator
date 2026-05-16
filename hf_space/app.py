@@ -7,8 +7,12 @@ import numpy as np
 import io
 import time
 import random
+import os
 import insightface
 from insightface.app import FaceAnalysis
+from pathlib import Path
+from huggingface_hub import hf_hub_download
+from controlnet_aux import OpenposeDetector
 
 STYLES = {
     "Anime":        "anime style, studio ghibli, makoto shinkai, beautiful highly detailed face, large expressive sparkling anime eyes, detailed iris and pupil, clean sharp lineart, soft cel shading, vibrant colors, perfect anatomy, perfect hands, detailed fingers, flowing hair",
@@ -21,51 +25,17 @@ STYLES = {
     "Watercolor":   "watercolor portrait, soft colors, artistic, dreamy, beautiful illustration, flowing paint, highly detailed face, beautiful expressive eyes, soft perfect hands, delicate fingers",
 }
 
-
-
-import os
-from pathlib import Path
-from huggingface_hub import hf_hub_download
-
-MODEL_DIR     = Path(os.environ.get("MODEL_DIR", "./models"))
-SWAPPER_MODEL = MODEL_DIR / "inswapper_128.onnx"
-GFPGAN_MODEL  = MODEL_DIR / "GFPGANv1.4.pth"
 SD_MODEL      = "Lykon/DreamShaper"
+SWAPPER_PATH  = "./models/inswapper_128.onnx"
+GFPGAN_PATH   = "./models/GFPGANv1.4.pth"
+DEVICE        = "cuda" if torch.cuda.is_available() else "cpu"
 
-def download_models():
-    os.makedirs("models", exist_ok=True)
-    print(f"MODEL_DIR: {MODEL_DIR}")
-    print(f"SWAPPER exists: {SWAPPER_MODEL.exists()}")
-    print(f"SWAPPER path: {SWAPPER_MODEL}")
-    try:
-        if not SWAPPER_MODEL.exists():
-            print("Downloading inswapper_128.onnx...")
-            hf_hub_download(
-                repo_id="Tejaswi2006/avatar-models",
-                filename="inswapper_128.onnx",
-                local_dir="./models"
-            )
-            print("Done!")
-        if not GFPGAN_MODEL.exists():
-            print("Downloading GFPGANv1.4.pth...")
-            hf_hub_download(
-                repo_id="Tejaswi2006/avatar-models",
-                filename="GFPGANv1.4.pth",
-                local_dir="./models"
-            )
-            print("Done!")
-    except Exception as e:
-        print(f"DOWNLOAD FAILED: {e}")
-
-download_models()
-
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
+os.makedirs("models", exist_ok=True)
 
 @st.cache_resource
 def load_base_model():
     pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
-        SD_MODEL,  # ← fixed
+        SD_MODEL,
         torch_dtype=torch.float16,
         safety_checker=None,
     )
@@ -80,7 +50,7 @@ def load_controlnet_model():
         torch_dtype=torch.float16
     )
     pipe = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
-        SD_MODEL,  # ← fixed
+        SD_MODEL,
         controlnet=controlnet,
         torch_dtype=torch.float16,
         safety_checker=None,
@@ -91,42 +61,43 @@ def load_controlnet_model():
 
 @st.cache_resource
 def load_face_swapper():
-    os.makedirs("models", exist_ok=True)
-    # Download directly to the exact path insightface expects
-    swapper_path = "./models/inswapper_128.onnx"
-    if not os.path.exists(swapper_path):
-        from huggingface_hub import hf_hub_download
-        downloaded = hf_hub_download(
+    if not os.path.exists(SWAPPER_PATH):
+        print("Downloading inswapper_128.onnx...")
+        hf_hub_download(
             repo_id="Tejaswi2006/avatar-models",
             filename="inswapper_128.onnx",
             local_dir="./models",
-            local_dir_use_symlinks=False  # ← forces actual copy not symlink
+            local_dir_use_symlinks=False
         )
-        print(f"Downloaded to: {downloaded}")
+        print(f"Exists after download: {os.path.exists(SWAPPER_PATH)}")
     app = FaceAnalysis(name="buffalo_l", providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
     app.prepare(ctx_id=0, det_size=(640, 640))
-    swapper = insightface.model_zoo.get_model(swapper_path, download=False)
+    swapper = insightface.model_zoo.get_model(SWAPPER_PATH, download=False)
     return app, swapper
 
 @st.cache_resource
 def load_gfpgan():
-    from gfpgan import GFPGANer
-    gfpgan_path = "./models/GFPGANv1.4.pth"
-    if not os.path.exists(gfpgan_path):
-        from huggingface_hub import hf_hub_download
+    if not os.path.exists(GFPGAN_PATH):
+        print("Downloading GFPGANv1.4.pth...")
         hf_hub_download(
             repo_id="Tejaswi2006/avatar-models",
             filename="GFPGANv1.4.pth",
             local_dir="./models",
             local_dir_use_symlinks=False
         )
+    from gfpgan import GFPGANer
     return GFPGANer(
-        model_path=gfpgan_path,
+        model_path=GFPGAN_PATH,
         upscale=1,
         arch="clean",
         channel_multiplier=2,
         bg_upsampler=None
     )
+
+@st.cache_resource
+def load_openpose():
+    return OpenposeDetector.from_pretrained("lllyasviel/ControlNet")
+
 def prepare_image(uploaded_file, size=(512, 512)) -> Image.Image:
     img = Image.open(uploaded_file).convert("RGB")
     if img.size != size:
@@ -150,7 +121,7 @@ def swap_face(source_img, target_img, app, swapper):
     tgt_faces2 = app.get(result)
     if len(tgt_faces2) > 0:
         for tgt_face in tgt_faces2:
-            result = swapper.get(result, tgt_face, src_faces[0], paste_back=True)   
+            result = swapper.get(result, tgt_face, src_faces[0], paste_back=True)
     return Image.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
 
 def restore_face(image: Image.Image, restorer) -> Image.Image:
@@ -163,14 +134,8 @@ def restore_face(image: Image.Image, restorer) -> Image.Image:
     )
     return Image.fromarray(cv2.cvtColor(restored, cv2.COLOR_BGR2RGB))
 
-from controlnet_aux import OpenposeDetector
-
-@st.cache_resource
-def load_openpose():
-    return OpenposeDetector.from_pretrained("lllyasviel/ControlNet")
-
 def make_openpose(image: Image.Image, detector) -> Image.Image:
-    return detector(image)  # detects body + hand keypoints
+    return detector(image)
 
 def run_pipe(pipe, prompt, negative, image, strength, steps, guidance, seed):
     gen = torch.Generator(device=DEVICE).manual_seed(seed)
@@ -183,12 +148,12 @@ def run_pipe(pipe, prompt, negative, image, strength, steps, guidance, seed):
         num_images_per_prompt=1
     ).images[0]
 
-def run_controlnet_pipe(pipe, prompt, negative, image, canny, strength, steps, guidance, seed, cn_scale=0.5):
+def run_controlnet_pipe(pipe, prompt, negative, image, pose, strength, steps, guidance, seed, cn_scale=0.5):
     gen = torch.Generator(device=DEVICE).manual_seed(seed)
     return pipe(
         prompt=prompt, negative_prompt=negative,
         image=image,
-        control_image=canny,
+        control_image=pose,
         strength=strength,
         num_inference_steps=int(steps),
         guidance_scale=guidance,
@@ -216,10 +181,10 @@ steps      = st.slider("Quality steps", 15, 50, 30, 5)
 variations = st.slider("Number of variations", 1, 4, 1, 1)
 
 with st.expander("Advanced"):
-    base_strength  = st.slider("Base strength (Step 1)", 0.3, 0.8, 0.55, 0.05)
-    style_strength = st.slider("Style strength (Step 3)", 0.2, 0.6, 0.25, 0.05)  
-    guidance       = st.slider("Guidance scale", 5.0, 12.0, 7.5, 0.5)
-    cn_scale       = st.slider("ControlNet strength", 0.3, 0.9, 0.5, 0.05) 
+    base_strength  = st.slider("Base strength (Step 1)", 0.3, 0.6, 0.50, 0.05)
+    style_strength = st.slider("Style strength (Step 4)", 0.2, 0.5, 0.25, 0.05)
+    guidance       = st.slider("Guidance scale", 5.0, 12.0, 8.5, 0.5)
+    cn_scale       = st.slider("ControlNet strength", 0.3, 0.9, 0.5, 0.05)
 
 if st.button("Generate Avatar") and uploaded:
     image             = prepare_image(uploaded)
@@ -239,16 +204,14 @@ if st.button("Generate Avatar") and uploaded:
         "full body, wide shot, far away, small face, tiny face, distant"
     )
     base_prompt = (
-        f"realistic portrait of a {gender.lower()}, light natural skin tone, fair skin, "
-        f"sharp focus, studio lighting, 8k, highly detailed face, beautiful eyes, "
-        f"perfect hands, professional photo, masterpiece, best quality, detailed fingers, "
-        f"close up portrait, face centered"
+        f"realistic portrait of a {gender.lower()}, natural skin tone, sharp focus, "
+        f"studio lighting, 8k, highly detailed face, beautiful eyes, perfect hands, "
+        f"professional photo, masterpiece, best quality, close up portrait, face centered"
     )
     style_prompt = (
-        f"{STYLES[style]}, portrait of a {gender.lower()}, light natural skin tone, fair skin, "
+        f"{STYLES[style]}, portrait of a {gender.lower()}, natural skin tone, "
         f"masterpiece, best quality, 8k, highly detailed face, beautiful expressive eyes, "
-        f"looking at viewer, perfect hands, detailed fingers, anatomically correct hands, "
-        f"close up portrait, face centered, upper body shot"
+        f"looking at viewer, perfect hands, close up portrait, face centered, upper body shot"
     )
 
     num_var     = int(variations)
