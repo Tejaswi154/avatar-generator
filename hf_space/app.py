@@ -91,16 +91,37 @@ def load_controlnet_model():
 
 @st.cache_resource
 def load_face_swapper():
+    os.makedirs("models", exist_ok=True)
+    # Download directly to the exact path insightface expects
+    swapper_path = "./models/inswapper_128.onnx"
+    if not os.path.exists(swapper_path):
+        from huggingface_hub import hf_hub_download
+        downloaded = hf_hub_download(
+            repo_id="Tejaswi2006/avatar-models",
+            filename="inswapper_128.onnx",
+            local_dir="./models",
+            local_dir_use_symlinks=False  # ← forces actual copy not symlink
+        )
+        print(f"Downloaded to: {downloaded}")
     app = FaceAnalysis(name="buffalo_l", providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
     app.prepare(ctx_id=0, det_size=(640, 640))
-    swapper = insightface.model_zoo.get_model(str(SWAPPER_MODEL), download=False)  # ← fixed
+    swapper = insightface.model_zoo.get_model(swapper_path, download=False)
     return app, swapper
 
 @st.cache_resource
 def load_gfpgan():
     from gfpgan import GFPGANer
+    gfpgan_path = "./models/GFPGANv1.4.pth"
+    if not os.path.exists(gfpgan_path):
+        from huggingface_hub import hf_hub_download
+        hf_hub_download(
+            repo_id="Tejaswi2006/avatar-models",
+            filename="GFPGANv1.4.pth",
+            local_dir="./models",
+            local_dir_use_symlinks=False
+        )
     return GFPGANer(
-        model_path=str(GFPGAN_MODEL),  # ← fixed
+        model_path=gfpgan_path,
         upscale=1,
         arch="clean",
         channel_multiplier=2,
