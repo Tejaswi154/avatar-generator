@@ -1,0 +1,13 @@
+torch
+torchvision
+diffusers==0.21.4
+transformers
+accelerate
+streamlit
+insightface
+onnxruntime-gpu
+opencv-python
+gfpgan
+basicsr
+facexlib
+controlnet-aux
