@@ -1,7 +1,7 @@
 ﻿import torch
 import streamlit as st
 from PIL import Image
-from diffusers import StableDiffusionImg2ImgPipeline, StableDiffusionControlNetImg2ImgPipeline, ControlNetModel, UniPCMultistepScheduler
+from diffusers import StableDiffusionImg2ImgPipeline, StableDiffusionPipeline, StableDiffusionControlNetImg2ImgPipeline, ControlNetModel, UniPCMultistepScheduler
 import cv2
 import numpy as np
 import io
@@ -21,37 +21,52 @@ STYLES = {
     "Watercolor":   "watercolor portrait, soft colors, artistic, dreamy, beautiful illustration, flowing paint, highly detailed face, beautiful expressive eyes, soft perfect hands, delicate fingers",
 }
 
+
+
 import os
 from pathlib import Path
-
 from huggingface_hub import hf_hub_download
 
-def download_models():
-    os.makedirs("models", exist_ok=True)
-    if not SWAPPER_MODEL.exists():
-        hf_hub_download(
-            repo_id="Tejaswi2006/avatar-models",
-            filename="inswapper_128.onnx",
-            local_dir="./models"
-        )
-    if not GFPGAN_MODEL.exists():
-        hf_hub_download(
-            repo_id="Tejaswi2006/avatar-models",
-            filename="GFPGANv1.4.pth",
-            local_dir="./models"
-        )
-
-download_models()
 MODEL_DIR     = Path(os.environ.get("MODEL_DIR", "./models"))
 SWAPPER_MODEL = MODEL_DIR / "inswapper_128.onnx"
 GFPGAN_MODEL  = MODEL_DIR / "GFPGANv1.4.pth"
 SD_MODEL      = "Lykon/DreamShaper"
 
+def download_models():
+    os.makedirs("models", exist_ok=True)
+    print(f"MODEL_DIR: {MODEL_DIR}")
+    print(f"SWAPPER_MODEL path: {SWAPPER_MODEL}")
+    print(f"SWAPPER exists: {SWAPPER_MODEL.exists()}")
+    try:
+        if not SWAPPER_MODEL.exists():
+            print("Downloading inswapper_128.onnx...")
+            path = hf_hub_download(
+                repo_id="Tejaswi2006/avatar-models",
+                filename="inswapper_128.onnx",
+                local_dir="./models"
+            )
+            print(f"Downloaded to: {path}")
+            print(f"Now exists: {SWAPPER_MODEL.exists()}")
+        if not GFPGAN_MODEL.exists():
+            print("Downloading GFPGANv1.4.pth...")
+            path = hf_hub_download(
+                repo_id="Tejaswi2006/avatar-models",
+                filename="GFPGANv1.4.pth",
+                local_dir="./models"
+            )
+            print(f"Downloaded to: {path}")
+    except Exception as e:
+        print(f"DOWNLOAD FAILED: {e}")
+
+download_models()
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+
 @st.cache_resource
 def load_base_model():
     pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
-        r"C:\avatar_generator\models\dreamshaper8",
+        SD_MODEL,  # ← fixed
         torch_dtype=torch.float16,
         safety_checker=None,
     )
@@ -66,7 +81,7 @@ def load_controlnet_model():
         torch_dtype=torch.float16
     )
     pipe = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
-        r"C:\avatar_generator\models\dreamshaper8",
+        SD_MODEL,  # ← fixed
         controlnet=controlnet,
         torch_dtype=torch.float16,
         safety_checker=None,
@@ -79,19 +94,39 @@ def load_controlnet_model():
 def load_face_swapper():
     app = FaceAnalysis(name="buffalo_l", providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
     app.prepare(ctx_id=0, det_size=(640, 640))
-    swapper = insightface.model_zoo.get_model(SWAPPER_MODEL, download=False)
+    swapper = insightface.model_zoo.get_model(str(SWAPPER_MODEL), download=False)  # ← fixed
     return app, swapper
 
 @st.cache_resource
 def load_gfpgan():
     from gfpgan import GFPGANer
     return GFPGANer(
-        model_path=r"C:\avatar_generator\models\GFPGANv1.4.pth",
+        model_path=str(GFPGAN_MODEL),  # ← fixed
         upscale=1,
         arch="clean",
         channel_multiplier=2,
         bg_upsampler=None
     )
+
+@st.cache_resource
+def load_ip_adapter():
+    from ip_adapter import IPAdapter
+    from diffusers import StableDiffusionPipeline
+    pipe = StableDiffusionPipeline.from_pretrained(
+        SD_MODEL,
+        torch_dtype=torch.float16,
+        safety_checker=None,
+    )
+    pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
+    pipe.enable_attention_slicing()
+    pipe = pipe.to(DEVICE)
+    ip_model = IPAdapter(
+        pipe,
+        image_encoder_path="laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
+        ip_ckpt=r"C:\avatar_generator\models\models\ip-adapter_sd15.bin",
+        device=DEVICE
+    )
+    return ip_model
 
 def prepare_image(uploaded_file, size=(512, 512)) -> Image.Image:
     img = Image.open(uploaded_file).convert("RGB")
@@ -128,6 +163,15 @@ def restore_face(image: Image.Image, restorer) -> Image.Image:
         paste_back=True
     )
     return Image.fromarray(cv2.cvtColor(restored, cv2.COLOR_BGR2RGB))
+
+def get_face_embedding(image: Image.Image, app):
+    img_bgr = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    faces = app.get(img_bgr)
+    if len(faces) == 0:
+        st.error("⚠️ No face detected in uploaded photo!")
+        st.stop()
+    import torch
+    return torch.from_numpy(faces[0].normed_embedding).unsqueeze(0)
 
 from controlnet_aux import OpenposeDetector
 
@@ -194,6 +238,9 @@ if st.button("Generate Avatar") and uploaded:
     openpose_detector = load_openpose()
     app, swapper      = load_face_swapper()
     restorer          = load_gfpgan()
+    ip_model          = load_ip_adapter()
+
+    
 
     negative = (
         "blurry, low quality, ugly, watermark, distorted face, bad anatomy, deformed, disfigured, "
@@ -229,9 +276,16 @@ if st.button("Generate Avatar") and uploaded:
 
         completed += 1
         progress.progress(completed / total_steps,
-                          text=f"[{i+1}/{num_var}] Step 1: Generating realistic base...")
-        realistic = run_pipe(pipe, base_prompt, negative,
-                             image, base_strength, steps, guidance, seed)
+                          text=f"[{i+1}/{num_var}] Step 1: Generating with your face locked...")
+        realistic = ip_model.generate(
+            pil_image=image,
+            prompt=base_prompt,
+            negative_prompt=negative,
+            num_inference_steps=int(steps),
+            guidance_scale=guidance,
+            num_samples=1,
+            seed=seed
+        )[0]
 
         completed += 1
         progress.progress(completed / total_steps,
