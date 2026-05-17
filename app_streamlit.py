@@ -1,7 +1,10 @@
-﻿import torch
+﻿import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+import torch
 import streamlit as st
 from PIL import Image
-from diffusers import StableDiffusionImg2ImgPipeline, StableDiffusionPipeline, StableDiffusionControlNetImg2ImgPipeline, ControlNetModel, UniPCMultistepScheduler
+from diffusers import StableDiffusionImg2ImgPipeline, StableDiffusionControlNetImg2ImgPipeline, ControlNetModel, UniPCMultistepScheduler
 import cv2
 import numpy as np
 import io
@@ -9,6 +12,9 @@ import time
 import random
 import insightface
 from insightface.app import FaceAnalysis
+from pathlib import Path
+from huggingface_hub import hf_hub_download
+from controlnet_aux import OpenposeDetector
 
 STYLES = {
     "Anime":        "anime style, studio ghibli, makoto shinkai, beautiful highly detailed face, large expressive sparkling anime eyes, detailed iris and pupil, clean sharp lineart, soft cel shading, vibrant colors, perfect anatomy, perfect hands, detailed fingers, flowing hair",
@@ -21,12 +27,6 @@ STYLES = {
     "Watercolor":   "watercolor portrait, soft colors, artistic, dreamy, beautiful illustration, flowing paint, highly detailed face, beautiful expressive eyes, soft perfect hands, delicate fingers",
 }
 
-
-
-import os
-from pathlib import Path
-from huggingface_hub import hf_hub_download
-
 MODEL_DIR     = Path(os.environ.get("MODEL_DIR", "./models"))
 SWAPPER_MODEL = MODEL_DIR / "inswapper_128.onnx"
 GFPGAN_MODEL  = MODEL_DIR / "GFPGANv1.4.pth"
@@ -34,27 +34,23 @@ SD_MODEL      = "Lykon/DreamShaper"
 
 def download_models():
     os.makedirs("models", exist_ok=True)
-    print(f"MODEL_DIR: {MODEL_DIR}")
-    print(f"SWAPPER_MODEL path: {SWAPPER_MODEL}")
-    print(f"SWAPPER exists: {SWAPPER_MODEL.exists()}")
     try:
         if not SWAPPER_MODEL.exists():
             print("Downloading inswapper_128.onnx...")
-            path = hf_hub_download(
+            hf_hub_download(
                 repo_id="Tejaswi2006/avatar-models",
                 filename="inswapper_128.onnx",
-                local_dir="./models"
+                local_dir="./models",
+                local_dir_use_symlinks=False
             )
-            print(f"Downloaded to: {path}")
-            print(f"Now exists: {SWAPPER_MODEL.exists()}")
         if not GFPGAN_MODEL.exists():
             print("Downloading GFPGANv1.4.pth...")
-            path = hf_hub_download(
+            hf_hub_download(
                 repo_id="Tejaswi2006/avatar-models",
                 filename="GFPGANv1.4.pth",
-                local_dir="./models"
+                local_dir="./models",
+                local_dir_use_symlinks=False
             )
-            print(f"Downloaded to: {path}")
     except Exception as e:
         print(f"DOWNLOAD FAILED: {e}")
 
@@ -62,11 +58,10 @@ download_models()
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-
 @st.cache_resource
 def load_base_model():
     pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
-        SD_MODEL,  # ← fixed
+        SD_MODEL,
         torch_dtype=torch.float16,
         safety_checker=None,
     )
@@ -81,7 +76,7 @@ def load_controlnet_model():
         torch_dtype=torch.float16
     )
     pipe = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
-        SD_MODEL,  # ← fixed
+        SD_MODEL,
         controlnet=controlnet,
         torch_dtype=torch.float16,
         safety_checker=None,
@@ -94,14 +89,14 @@ def load_controlnet_model():
 def load_face_swapper():
     app = FaceAnalysis(name="buffalo_l", providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
     app.prepare(ctx_id=0, det_size=(640, 640))
-    swapper = insightface.model_zoo.get_model(str(SWAPPER_MODEL), download=False)  # ← fixed
+    swapper = insightface.model_zoo.get_model(str(SWAPPER_MODEL), download=False)
     return app, swapper
 
 @st.cache_resource
 def load_gfpgan():
     from gfpgan import GFPGANer
     return GFPGANer(
-        model_path=str(GFPGAN_MODEL),  # ← fixed
+        model_path=str(GFPGAN_MODEL),
         upscale=1,
         arch="clean",
         channel_multiplier=2,
@@ -109,24 +104,8 @@ def load_gfpgan():
     )
 
 @st.cache_resource
-def load_ip_adapter():
-    from ip_adapter import IPAdapter
-    from diffusers import StableDiffusionPipeline
-    pipe = StableDiffusionPipeline.from_pretrained(
-        SD_MODEL,
-        torch_dtype=torch.float16,
-        safety_checker=None,
-    )
-    pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
-    pipe.enable_attention_slicing()
-    pipe = pipe.to(DEVICE)
-    ip_model = IPAdapter(
-        pipe,
-        image_encoder_path="laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
-        ip_ckpt=r"C:\avatar_generator\models\models\ip-adapter_sd15.bin",
-        device=DEVICE
-    )
-    return ip_model
+def load_openpose():
+    return OpenposeDetector.from_pretrained("lllyasviel/ControlNet")
 
 def prepare_image(uploaded_file, size=(512, 512)) -> Image.Image:
     img = Image.open(uploaded_file).convert("RGB")
@@ -140,10 +119,10 @@ def swap_face(source_img, target_img, app, swapper):
     src_faces = app.get(src)
     tgt_faces = app.get(tgt)
     if len(src_faces) == 0:
-        st.warning("⚠️ No face detected in your uploaded photo.")
+        st.warning("No face detected in your uploaded photo.")
         return target_img
     if len(tgt_faces) == 0:
-        st.warning("⚠️ No face detected in generated image — skipping swap.")
+        st.warning("No face detected in generated image - skipping swap.")
         return target_img
     result = tgt.copy()
     for tgt_face in tgt_faces:
@@ -151,7 +130,7 @@ def swap_face(source_img, target_img, app, swapper):
     tgt_faces2 = app.get(result)
     if len(tgt_faces2) > 0:
         for tgt_face in tgt_faces2:
-            result = swapper.get(result, tgt_face, src_faces[0], paste_back=True)   
+            result = swapper.get(result, tgt_face, src_faces[0], paste_back=True)
     return Image.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
 
 def restore_face(image: Image.Image, restorer) -> Image.Image:
@@ -164,23 +143,8 @@ def restore_face(image: Image.Image, restorer) -> Image.Image:
     )
     return Image.fromarray(cv2.cvtColor(restored, cv2.COLOR_BGR2RGB))
 
-def get_face_embedding(image: Image.Image, app):
-    img_bgr = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-    faces = app.get(img_bgr)
-    if len(faces) == 0:
-        st.error("⚠️ No face detected in uploaded photo!")
-        st.stop()
-    import torch
-    return torch.from_numpy(faces[0].normed_embedding).unsqueeze(0)
-
-from controlnet_aux import OpenposeDetector
-
-@st.cache_resource
-def load_openpose():
-    return OpenposeDetector.from_pretrained("lllyasviel/ControlNet")
-
 def make_openpose(image: Image.Image, detector) -> Image.Image:
-    return detector(image)  # detects body + hand keypoints
+    return detector(image)
 
 def run_pipe(pipe, prompt, negative, image, strength, steps, guidance, seed):
     gen = torch.Generator(device=DEVICE).manual_seed(seed)
@@ -193,12 +157,12 @@ def run_pipe(pipe, prompt, negative, image, strength, steps, guidance, seed):
         num_images_per_prompt=1
     ).images[0]
 
-def run_controlnet_pipe(pipe, prompt, negative, image, canny, strength, steps, guidance, seed, cn_scale=0.5):
+def run_controlnet_pipe(pipe, prompt, negative, image, pose, strength, steps, guidance, seed, cn_scale=0.5):
     gen = torch.Generator(device=DEVICE).manual_seed(seed)
     return pipe(
         prompt=prompt, negative_prompt=negative,
         image=image,
-        control_image=canny,
+        control_image=pose,
         strength=strength,
         num_inference_steps=int(steps),
         guidance_scale=guidance,
@@ -207,7 +171,6 @@ def run_controlnet_pipe(pipe, prompt, negative, image, canny, strength, steps, g
         num_images_per_prompt=1
     ).images[0]
 
-# ── UI ────────────────────────────────────────────────────────────────────────
 st.title("AI Avatar Generator")
 st.markdown("Your face. Your outfit. Any art style!")
 
@@ -222,14 +185,14 @@ with col1:
 with col2:
     gender = st.selectbox("Choose gender", ["Woman", "Man"])
 
-steps      = st.slider("Quality steps", 15, 50, 30, 5)
+steps      = st.slider("Quality steps", 15, 50, 25, 5)
 variations = st.slider("Number of variations", 1, 4, 1, 1)
 
 with st.expander("Advanced"):
-    base_strength  = st.slider("Base strength (Step 1)", 0.3, 0.8, 0.55, 0.05)
-    style_strength = st.slider("Style strength (Step 3)", 0.2, 0.6, 0.25, 0.05)  
-    guidance       = st.slider("Guidance scale", 5.0, 12.0, 7.5, 0.5)
-    cn_scale       = st.slider("ControlNet strength", 0.3, 0.9, 0.5, 0.05) 
+    base_strength  = st.slider("Base strength (Step 1)", 0.3, 0.6, 0.50, 0.05)
+    style_strength = st.slider("Style strength (Step 3)", 0.2, 0.5, 0.25, 0.05)
+    guidance       = st.slider("Guidance scale", 5.0, 12.0, 8.5, 0.5)
+    cn_scale       = st.slider("ControlNet strength", 0.3, 0.9, 0.5, 0.05)
 
 if st.button("Generate Avatar") and uploaded:
     image             = prepare_image(uploaded)
@@ -238,9 +201,6 @@ if st.button("Generate Avatar") and uploaded:
     openpose_detector = load_openpose()
     app, swapper      = load_face_swapper()
     restorer          = load_gfpgan()
-    ip_model          = load_ip_adapter()
-
-    
 
     negative = (
         "blurry, low quality, ugly, watermark, distorted face, bad anatomy, deformed, disfigured, "
@@ -249,19 +209,21 @@ if st.button("Generate Avatar") and uploaded:
         "extra digits, fewer digits, cropped, worst quality, jpeg artifacts, signature, username, "
         "artist name, bad proportions, gross proportions, duplicate, error, out of frame, "
         "ugly eyes, crossed eyes, lazy eye, asymmetric eyes, bad eyes, "
-        "full body, wide shot, far away, small face, tiny face, distant"
+        "full body, wide shot, far away, small face, tiny face, distant,"
+        "asymmetric eyes, uneven eyes, different sized eyes, one eye bigger, mismatched eyes"
     )
     base_prompt = (
-        f"realistic portrait of a {gender.lower()}, light natural skin tone, fair skin, "
-        f"sharp focus, studio lighting, 8k, highly detailed face, beautiful eyes, "
-        f"perfect hands, professional photo, masterpiece, best quality, detailed fingers, "
-        f"close up portrait, face centered"
+    f"realistic portrait of a {gender.lower()}, natural skin tone, sharp focus, "
+    f"studio lighting, 8k, highly detailed face, beautiful eyes, "
+    f"professional photo, masterpiece, best quality, close up portrait, "
+    f"preserve natural hair, keep original hairstyle, preserve outfit, preserve background"
     )
+
     style_prompt = (
-        f"{STYLES[style]}, portrait of a {gender.lower()}, light natural skin tone, fair skin, "
-        f"masterpiece, best quality, 8k, highly detailed face, beautiful expressive eyes, "
-        f"looking at viewer, perfect hands, detailed fingers, anatomically correct hands, "
-        f"close up portrait, face centered, upper body shot"
+    f"{STYLES[style]}, portrait of a {gender.lower()}, natural skin tone, "
+    f"masterpiece, best quality, 8k, highly detailed face, beautiful expressive eyes, "
+    f"looking at viewer, close up portrait, upper body shot, "
+    f"preserve natural hair, keep original hairstyle, same outfit, same background"
     )
 
     num_var     = int(variations)
@@ -276,16 +238,9 @@ if st.button("Generate Avatar") and uploaded:
 
         completed += 1
         progress.progress(completed / total_steps,
-                          text=f"[{i+1}/{num_var}] Step 1: Generating with your face locked...")
-        realistic = ip_model.generate(
-            pil_image=image,
-            prompt=base_prompt,
-            negative_prompt=negative,
-            num_inference_steps=int(steps),
-            guidance_scale=guidance,
-            num_samples=1,
-            seed=seed
-        )[0]
+                          text=f"[{i+1}/{num_var}] Step 1: Generating realistic base...")
+        realistic = run_pipe(pipe, base_prompt, negative,
+                             image, base_strength, steps, guidance, seed)
 
         completed += 1
         progress.progress(completed / total_steps,
@@ -317,7 +272,7 @@ if st.button("Generate Avatar") and uploaded:
 
     st.markdown("### Original")
     st.image(image, width=250)
-    st.markdown(f"### Generated Avatars — {style} style")
+    st.markdown(f"### Generated Avatars - {style} style")
     st.caption("Your face. Original outfit. New art style.")
 
     cols = st.columns(num_var)
